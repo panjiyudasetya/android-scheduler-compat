@@ -4,32 +4,29 @@ import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
 import android.os.Build;
-import android.preference.PreferenceManager;
 import android.support.annotation.NonNull;
 import android.util.SparseArray;
 
 import com.tech21.lunart.scheduler.compat.IScheduler;
 import com.tech21.lunart.scheduler.compat.SchedulerCompat;
-import com.tech21.lunart.scheduler.compat.SchedulerOptions;
+import com.tech21.lunart.scheduler.compat.SchedulerOption;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.TimeUnit;
 
 import static com.tech21.lunart.scheduler.compat.SchedulerCompat.OCCUR_EVERY_DAYLIGHT;
 import static com.tech21.lunart.scheduler.compat.SchedulerCompat.OCCUR_EVERY_MIDNIGHT;
+import static com.tech21.lunart.scheduler.compat.SchedulerCompat.OCCUR_EVERY_SPECIFIC_TIME;
 import static com.tech21.lunart.scheduler.compat.SchedulerCompat.OCCUR_ONCE;
-import static com.tech21.lunart.scheduler.compat.SchedulerCompat.OCCUR_ONCE_PRIORITY_URGENT;
+import static com.tech21.lunart.scheduler.compat.SchedulerCompat.OCCUR_ONCE_IMMEDIATELY;
 
-public class AlarmService implements IScheduler<AlarmService>, IScheduler.Lifecycle {
-    private static final String ACTION_SCHEDULE_ALARM_SERVICE_INTENT
+public class AlarmService implements IScheduler<AlarmService> {
+    public static final String ACTION_SCHEDULE_ALARM_SERVICE_INTENT
             = "ACTION_SCHEDULE_ALARM_SERVICE_INTENT";
 
-    private final SparseArray<SchedulerOptions> options = new SparseArray<>();
-    private final AlarmReceiver alarmReceiver = new AlarmReceiver();
+    private final SparseArray<SchedulerOption> optHistory = new SparseArray<>();
     private WeakReference<Context> context;
-    private ReceiverState receiverState;
     private AlarmManager alarmManager;
 
     private static AlarmService sInstance;
@@ -37,54 +34,38 @@ public class AlarmService implements IScheduler<AlarmService>, IScheduler.Lifecy
     private AlarmService(Context context) {
         this.context = new WeakReference<>(context);
         this.alarmManager = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-        this.receiverState = new ReceiverState(context);
-        registerReceiver();
-    }
-
-    private void registerReceiver() {
-        if (!receiverState.didSuccessfullyRegisterAlarmReceiver()) {
-            context.get().registerReceiver(alarmReceiver, new IntentFilter(ACTION_SCHEDULE_ALARM_SERVICE_INTENT));
-            receiverState.setDidSuccessfullyRegisterAlarmReceiver(true);
-        }
-    }
-
-    private void unregisterReceiver() {
-        if (receiverState.didSuccessfullyRegisterAlarmReceiver()) {
-            context.get().unregisterReceiver(alarmReceiver);
-            receiverState.setDidSuccessfullyRegisterAlarmReceiver(false);
-        }
     }
 
     public static AlarmService with(@NonNull Context context) {
-        if (sInstance == null || sInstance.context == null || sInstance.context.get() == null) {
-            sInstance = null;
+        if (sInstance == null) {
             sInstance = new AlarmService(context);
+        }
+        if (sInstance.context == null || sInstance.context.get() == null) {
+            sInstance.context = new WeakReference<>(context);
         }
         return sInstance;
     }
 
     @Override
-    public void onStart() {
-        registerReceiver();
-    }
-
-    @Override
-    public AlarmService add(@NonNull SchedulerOptions options) {
+    public AlarmService add(@NonNull SchedulerOption option) {
         assert context != null && context.get() != null;
+        optHistory.append(option.getScheduleId(), option);
 
-        this.options.append(options.getScheduleId(), options);
-        switch (options.getRecurringType()) {
+        switch (option.getRecurringType()) {
             case OCCUR_EVERY_MIDNIGHT:
-                setRepeatingSchedule(options.getScheduleId(), 0, 0);
+                setRepeatingSchedule(option.getScheduleId(), 0, 0);
                 break;
             case OCCUR_EVERY_DAYLIGHT:
-                setRepeatingSchedule(options.getScheduleId(), 12, 0);
+                setRepeatingSchedule(option.getScheduleId(), 12, 0);
                 break;
             case OCCUR_ONCE:
-                setSchedule(options.getScheduleFor(), options.getScheduleId());
+                setSchedule(option.getScheduleFor(), option.getScheduleId());
                 break;
-            case OCCUR_ONCE_PRIORITY_URGENT:
-                setUrgentSchedule(options.getScheduleId());
+            case OCCUR_ONCE_IMMEDIATELY:
+                setUrgentSchedule(option.getScheduleId());
+                break;
+            case OCCUR_EVERY_SPECIFIC_TIME:
+                setRepeatingSchedule(option.getScheduleId(), option.getScheduleFor());
                 break;
         }
 
@@ -94,7 +75,7 @@ public class AlarmService implements IScheduler<AlarmService>, IScheduler.Lifecy
     @Override
     public void cancel(int scheduleId) {
         assert context != null && context.get() != null;
-        Intent alarmIntent = new Intent(context.get(), AlarmReceiver.class);
+        Intent alarmIntent = constructIntent(scheduleId);
         PendingIntent pendingIntent = PendingIntent.getBroadcast(
                 context.get(),
                 scheduleId,
@@ -102,41 +83,42 @@ public class AlarmService implements IScheduler<AlarmService>, IScheduler.Lifecy
                 PendingIntent.FLAG_UPDATE_CURRENT);
 
         alarmManager.cancel(pendingIntent);
-        options.remove(scheduleId);
+        optHistory.remove(scheduleId);
     }
 
     @Override
     public void cancelAll() {
         assert context != null && context.get() != null;
 
-        for (int i = 0; i < options.size(); i++) {
-            int scheduleId = options.keyAt(i);
+        for (int i = 0; i < optHistory.size(); i++) {
+            int scheduleId = optHistory.keyAt(i);
             cancel(scheduleId);
         }
     }
 
-    @Override
-    public void onStop() {
-        unregisterReceiver();
-    }
-
     private void setUrgentSchedule(int scheduleId) {
         final long fewMinutesFromNow = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1);
-        Intent exactIntent = new Intent(context.get(), AlarmReceiver.class);
+        Intent exactIntent = constructIntent(scheduleId);
         setSchedule(fewMinutesFromNow, scheduleId, exactIntent);
     }
 
     private void setRepeatingSchedule(int scheduleId, int hourOfDay, int minutes) {
         final long oneDayInMillis = TimeUnit.DAYS.toMillis(1);
-
-        Intent alarmIntent = new Intent(context.get(), AlarmReceiver.class);
+        Intent alarmIntent = constructIntent(scheduleId);
         setRepeatingSchedule(scheduleId, SchedulerCompat.scheduleFor(hourOfDay, minutes),
+                oneDayInMillis, alarmIntent);
+    }
+
+    private void setRepeatingSchedule(int scheduleId, long triggeredAtMillis) {
+        final long oneDayInMillis = TimeUnit.DAYS.toMillis(1);
+        Intent alarmIntent = constructIntent(scheduleId);
+        setRepeatingSchedule(scheduleId, triggeredAtMillis,
                 oneDayInMillis, alarmIntent);
     }
 
     private void setRepeatingSchedule(
             int scheduleId,
-            long triggerAtMillis,
+            long triggeredAtMillis,
             long intervalInMillis,
             @NonNull Intent repeatingHandlerIntent
     ) {
@@ -148,14 +130,14 @@ public class AlarmService implements IScheduler<AlarmService>, IScheduler.Lifecy
 
         alarmManager.setRepeating(
                 AlarmManager.RTC_WAKEUP,
-                triggerAtMillis,
+                triggeredAtMillis,
                 intervalInMillis,
                 pendingIntent
         );
     }
 
     private void setSchedule(long triggeredAtMillis, int scheduleId) {
-        Intent exactIntent = new Intent(context.get(), AlarmReceiver.class);
+        Intent exactIntent = constructIntent(scheduleId);
         setSchedule(triggeredAtMillis, scheduleId, exactIntent);
     }
 
@@ -181,25 +163,10 @@ public class AlarmService implements IScheduler<AlarmService>, IScheduler.Lifecy
         }
     }
 
-    class ReceiverState {
-        private Context context;
-        private static final String DID_SUCCESSFULLY_REGISTER_ALARM_RECEIVER
-                = "DID_SUCCESSFULLY_REGISTER_ALARM_RECEIVER";
-
-        ReceiverState(@NonNull Context context) {
-            this.context = context;
-        }
-
-        boolean didSuccessfullyRegisterAlarmReceiver() {
-            return PreferenceManager.getDefaultSharedPreferences(context)
-                    .getBoolean(DID_SUCCESSFULLY_REGISTER_ALARM_RECEIVER, false);
-        }
-
-        void setDidSuccessfullyRegisterAlarmReceiver(boolean status) {
-            PreferenceManager.getDefaultSharedPreferences(context)
-                    .edit()
-                    .putBoolean(DID_SUCCESSFULLY_REGISTER_ALARM_RECEIVER, status)
-                    .apply();
-        }
+    private Intent constructIntent(int scheduleId) {
+        Intent intent = new Intent(context.get(), AlarmReceiver.class);
+        SchedulerOption option = optHistory.get(scheduleId);
+        intent.putExtras(new SchedulerOption.Builder().toBundle(option));
+        return intent;
     }
 }

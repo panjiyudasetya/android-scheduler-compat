@@ -6,6 +6,7 @@ import android.app.job.JobScheduler;
 import android.app.job.JobService;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Build;
 import android.os.PersistableBundle;
 import android.support.annotation.NonNull;
@@ -15,7 +16,7 @@ import android.util.SparseArray;
 import com.tech21.lunart.scheduler.compat.IScheduler;
 import com.tech21.lunart.scheduler.compat.SchedulerCompat;
 import com.tech21.lunart.scheduler.compat.SchedulerCompat.RecurringType;
-import com.tech21.lunart.scheduler.compat.SchedulerOptions;
+import com.tech21.lunart.scheduler.compat.SchedulerOption;
 
 import java.lang.ref.WeakReference;
 import java.util.concurrent.TimeUnit;
@@ -27,19 +28,26 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
     private static final String TAG = SchedulerService.class.getSimpleName();
 
     private WeakReference<Context> context;
-    private final SparseArray<SchedulerOptions> options = new SparseArray<>();
+    private static final SparseArray<SchedulerOption> optHistory = new SparseArray<>();
     private JobScheduler jobScheduler;
     private static SchedulerService sInstance;
 
+    public SchedulerService() {
+        // Default constructor, used by Android system service
+    }
+
     private SchedulerService(@NonNull Context context) {
+        this();
         this.context = new WeakReference<>(context);
         this.jobScheduler = getAndroidJobScheduler();
     }
 
     public static SchedulerService with(@NonNull Context context) {
-        if (sInstance == null || sInstance.context == null || sInstance.context.get() == null) {
-            sInstance = null;
+        if (sInstance == null) {
             sInstance = new SchedulerService(context);
+        }
+        if (sInstance.context == null || sInstance.context.get() == null) {
+            sInstance.context = new WeakReference<>(context);
         }
         return sInstance;
     }
@@ -57,27 +65,27 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
     }
 
     private JobInfo getJobInfo(@NonNull ComponentName componentName,
-                               @NonNull SchedulerOptions options) {
-        PersistableBundle extra = new SchedulerOptions.Builder().toBundle(options);
-        return new JobInfo.Builder(options.getScheduleId(), componentName)
+                               @NonNull SchedulerOption option) {
+        PersistableBundle extra = new SchedulerOption.Builder().toPersistableBundle(option);
+        return new JobInfo.Builder(option.getScheduleId(), componentName)
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setRequiresDeviceIdle(false)
                 .setMinimumLatency(getMinimumLatency(
-                        options.getScheduleFor(),
+                        option.getScheduleFor(),
                         System.currentTimeMillis()))
                 .setExtras(extra)
                 .build();
     }
 
     @Override
-    public SchedulerService add(@NonNull SchedulerOptions options) {
+    public SchedulerService add(@NonNull SchedulerOption option) {
         assert context != null && context.get() != null;
 
         ComponentName componentName = new ComponentName(context.get(), SchedulerService.class);
-        JobInfo jobInfo = getJobInfo(componentName, options);
+        JobInfo jobInfo = getJobInfo(componentName, option);
         jobScheduler = getAndroidJobScheduler();
         if (jobScheduler.schedule(jobInfo) == JobScheduler.RESULT_SUCCESS) {
-            this.options.append(options.getScheduleId(), options);
+            optHistory.append(option.getScheduleId(), option);
         }
         return this;
     }
@@ -88,32 +96,31 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
 
         jobScheduler = getAndroidJobScheduler();
         jobScheduler.cancel(scheduleId);
-        options.remove(scheduleId);
+        optHistory.remove(scheduleId);
     }
 
     @Override
     public void cancelAll() {
         assert context != null && context.get() != null;
 
-        for (int i = 0; i < options.size(); i++) {
-            int scheduleId = options.keyAt(i);
+        for (int i = 0; i < optHistory.size(); i++) {
+            int scheduleId = optHistory.keyAt(i);
             cancel(scheduleId);
         }
     }
 
     @Override
     public boolean onStartJob(JobParameters jobInfo) {
-        // TODO : Do something
-        // ...
-
-        // Reschedule the job when it's required
         PersistableBundle extra = jobInfo.getExtras();
-        if (isRecurringSchedule(extra.getInt(SchedulerOptions.RECURRING_TYPE_KEY))) {
-            jobFinished(jobInfo, false);
-            rescheduleForNext(new SchedulerOptions.Builder().fromBundle(extra));
+
+        sendBroadcast(extra);
+        jobFinished(jobInfo, false);
+
+        if (isRecurringSchedule(extra.getInt(SchedulerOption.RECURRING_TYPE_KEY))) {
+            rescheduleForNext(new SchedulerOption.Builder().fromBundle(extra),
+                    TimeUnit.DAYS.toMillis(1));
         }
 
-        jobFinished(jobInfo, false);
         return true;
     }
 
@@ -122,12 +129,20 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
         return true;
     }
 
-    private void rescheduleForNext(@NonNull SchedulerOptions options) {
-        with(this).add(new SchedulerOptions.Builder()
+    private void sendBroadcast(PersistableBundle extra) {
+        String actionName = extra.getString(SchedulerOption.SCHEDULE_RECEIVER_ACTION_NAME_KEY, "");
+        Intent intent = new Intent();
+        intent.setAction(actionName);
+        intent.putExtras(new SchedulerOption.Builder().toBundle(extra));
+        sendBroadcast(intent);
+    }
+
+    private void rescheduleForNext(@NonNull SchedulerOption options, long intervalInMillis) {
+        with(this).add(new SchedulerOption.Builder()
                 .scheduleId(options.getScheduleId())
                 .scheduleName(options.getScheduleName())
                 .recurringType(options.getRecurringType())
-                .scheduleFor(options.getScheduleFor() + TimeUnit.DAYS.toMillis(1))
+                .scheduleFor(options.getScheduleFor() + intervalInMillis)
                 .build());
     }
 
@@ -137,6 +152,7 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
 
     private boolean isRecurringSchedule(@RecurringType int type) {
         return type == SchedulerCompat.OCCUR_EVERY_MIDNIGHT
-                || type == SchedulerCompat.OCCUR_EVERY_DAYLIGHT;
+                || type == SchedulerCompat.OCCUR_EVERY_DAYLIGHT
+                || type == SchedulerCompat.OCCUR_EVERY_SPECIFIC_TIME;
     }
 }
