@@ -19,6 +19,7 @@ import com.tech21.lunart.scheduler.compat.SchedulerCompat.RecurringType;
 import com.tech21.lunart.scheduler.compat.SchedulerOption;
 
 import java.lang.ref.WeakReference;
+import java.util.Calendar;
 import java.util.concurrent.TimeUnit;
 
 import static android.os.Build.VERSION.SDK_INT;
@@ -71,8 +72,8 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
                 .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                 .setRequiresDeviceIdle(false)
                 .setMinimumLatency(getMinimumLatency(
-                        option.getScheduleFor(),
-                        System.currentTimeMillis()))
+                        option.getRecurringType(),
+                        option.getScheduleFor()))
                 .setExtras(extra)
                 .build();
     }
@@ -116,7 +117,7 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
         sendBroadcast(extra);
         jobFinished(jobInfo, false);
 
-        if (isRecurringSchedule(extra.getInt(SchedulerOption.RECURRING_TYPE_KEY))) {
+        if (isDailySchedule(extra.getInt(SchedulerOption.RECURRING_TYPE_KEY))) {
             rescheduleForNext(new SchedulerOption.Builder().fromBundle(extra),
                     TimeUnit.DAYS.toMillis(1));
         }
@@ -146,11 +147,21 @@ public class SchedulerService extends JobService implements IScheduler<Scheduler
                 .build());
     }
 
-    private long getMinimumLatency(long triggeredAtMillis, long currentTime) {
-        return Math.abs(triggeredAtMillis - currentTime);
+    private long getMinimumLatency(@RecurringType int type, long triggeredAtMillis) {
+        if (triggeredAtMillis > System.currentTimeMillis()) {
+            return triggeredAtMillis;
+        }
+
+        Calendar cal = Calendar.getInstance();
+        cal.setTimeInMillis(triggeredAtMillis);
+        if (isDailySchedule(type)) {
+            cal.add(Calendar.DATE, 1);
+            return cal.getTimeInMillis();
+        }
+        return triggeredAtMillis;
     }
 
-    private boolean isRecurringSchedule(@RecurringType int type) {
+    private boolean isDailySchedule(@RecurringType int type) {
         return type == SchedulerCompat.OCCUR_EVERY_MIDNIGHT
                 || type == SchedulerCompat.OCCUR_EVERY_DAYLIGHT
                 || type == SchedulerCompat.OCCUR_EVERY_SPECIFIC_TIME;
